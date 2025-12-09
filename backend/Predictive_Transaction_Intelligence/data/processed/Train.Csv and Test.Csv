@@ -1,0 +1,153 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix, roc_curve
+from imblearn.over_sampling import SMOTE  # For handling imbalance
+import xgboost as xgb
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+# Step 1: Load Your Dataset
+# Replace 'your_fraud_data.csv' with your actual file path
+df = pd.read_csv('/content/pooja.csv')  # e.g., 'fraud_dataset.csv'
+
+print(f"Dataset shape: {df.shape}")
+print(f"Columns: {list(df.columns)}")
+print(df.head())  # Preview first 5 rows
+
+# Basic info
+print(f"Fraud rate: {df['is_fraud'].mean():.2%}")
+print("\nData types:\n", df.dtypes)
+print("\nMissing values:\n", df.isnull().sum())
+
+# Step 2: Feature Engineering and Preprocessing
+# Drop non-predictive IDs
+df = df.drop(['transaction_id', 'customer_id'], axis=1, errors='ignore')
+
+# Handle timestamp: Convert to datetime and extract features
+df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+df['hour'] = df['timestamp'].dt.hour
+df['day_of_week'] = df['timestamp'].dt.dayofweek
+df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
+df = df.drop('timestamp', axis=1)  # Drop original after extraction
+
+# Handle kyc_verified: Encode to 0/1 (handles bool, int, or string like 'Yes'/'No')
+if df['kyc_verified'].dtype == 'bool':
+    df['kyc_verified'] = df['kyc_verified'].astype(int)
+else:
+    le = LabelEncoder()
+    df['kyc_verified'] = le.fit_transform(df['kyc_verified'].astype(str))
+
+# Handle transaction_amount: Log transform if skewed (common for amounts)
+df['log_transaction_amount'] = np.log1p(df['transaction_amount'])  # log(1 + x) for zeros
+df = df.drop('transaction_amount', axis=1)  # Use log version
+
+# Now columns: kyc_verified, account_age_days, channel, hour, day_of_week, is_weekend, log_transaction_amount, is_fraud
+
+# Step 3: Exploratory Data Analysis (EDA) Basics
+print("\n=== EDA ===")
+print(df.describe(include='all'))
+
+# Visualize imbalance
+plt.figure(figsize=(6, 4))
+sns.countplot(data=df, x='is_fraud')
+plt.title('Class Distribution')
+plt.show()
+
+# Box plot for log_amount by fraud
+plt.figure(figsize=(6, 4))
+sns.boxplot(data=df, x='is_fraud', y='log_transaction_amount')
+plt.title('Log Transaction Amount by Fraud')
+plt.show()
+
+# Correlation heatmap (numeric features)
+numeric_cols = df.select_dtypes(include=['number']).columns.drop('is_fraud')  # Exclude target
+plt.figure(figsize=(10, 8))
+sns.heatmap(df[numeric_cols.union(['is_fraud'])].corr(), annot=True, cmap='coolwarm', center=0)
+plt.title('Numeric Feature Correlations')
+plt.show()
+
+# Step 4: Prepare Features and Target
+X = df.drop('is_fraud', axis=1)
+y = df['is_fraud']
+
+# Identify categorical and numerical columns
+cat_cols = ['channel']  # Only channel is categorical now
+num_cols = [col for col in X.columns if col not in cat_cols]
+
+# Preprocessing pipeline: One-hot for cat, scale for num
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), num_cols),
+        ('cat', OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore'), cat_cols)
+    ])
+
+# Train-test split (stratified)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Apply preprocessing
+X_train_prep = preprocessor.fit_transform(X_train)
+X_test_prep = preprocessor.transform(X_test)
+
+# Handle imbalance with SMOTE
+smote = SMOTE(random_state=42)
+X_train_res, y_train_res = smote.fit_resample(X_train_prep, y_train)
+print(f"\nResampled train shape: {X_train_res.shape}, Fraud rate: {y_train_res.mean():.2%}")
+
+# Alternative: Use original with class weights (comment out SMOTE and use below in model)
+# imbalance_ratio = (y_train == 0).sum() / (y_train == 1).sum()
+
+# Step 5: Model Training (XGBoost - Recommended)
+model = xgb.XGBClassifier(
+    # scale_pos_weight=imbalance_ratio,  # Uncomment if using original data (no SMOTE)
+    eval_metric='auc',
+    random_state=42,
+    n_estimators=100,
+    max_depth=6,
+    learning_rate=0.1
+)
+
+# Train on resampled data
+model.fit(X_train_res, y_train_res)
+
+# Step 6: Predictions and Evaluation
+y_pred = model.predict(X_test_prep)
+y_prob = model.predict_proba(X_test_prep)[:, 1]
+
+# Metrics
+auc = roc_auc_score(y_test, y_prob)
+print(f"\n=== Evaluation ===")
+print(f"AUC-ROC: {auc:.4f}")
+print("\nClassification Report:\n", classification_report(y_test, y_pred))
+print("\nConfusion Matrix:\n", confusion_matrix(y_test, y_pred))
+
+# ROC Curve Plot
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+plt.figure(figsize=(6, 6))
+plt.plot(fpr, tpr, label=f'ROC Curve (AUC = {auc:.4f})')
+plt.plot([0, 1], [0, 1], 'k--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve')
+plt.legend()
+plt.show()
+
+# Feature Importance (note: after one-hot, channel features are prefixed)
+feature_names = num_cols + list(preprocessor.named_transformers_['cat'].get_feature_names_out(cat_cols))
+xgb.plot_importance(model, max_num_features=10, importance_type='gain')
+plt.show()  # Plot uses model internals; for labels, use pd.Series(model.feature_importances_, index=feature_names).plot()
+
+# Step 7: Save Model and Preprocessor (Optional)
+import joblib
+joblib.dump(model, 'fraud_model.pkl')
+joblib.dump(preprocessor, 'preprocessor.pkl')
+print("\nModel and preprocessor saved as 'fraud_model.pkl' and 'preprocessor.pkl'")
+
+# To load and predict on new data:
+# loaded_model = joblib.load('fraud_model.pkl')
+# loaded_preproc = joblib.load('preprocessor.pkl')
+# new_X_prep = loaded_preproc.transform(new_X)
+# preds = loaded_model.predict(new_X_prep)
