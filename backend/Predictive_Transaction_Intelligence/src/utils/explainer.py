@@ -1,24 +1,64 @@
-def generate_risk_explanation(data, prob):
-    # CASE 1: Model says LOW RISK
-    if prob < 0.1:
-        return (
-            "Transaction is classified as low risk based on learned patterns, "
-            "despite individual factors like amount or transaction type."
-        )
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
 
-    # CASE 2: Model says MEDIUM RISK
+load_dotenv()
+
+api_key = os.getenv("API_KEY")
+
+genai.configure(api_key = api_key)
+model = genai.GenerativeModel('gemini-2.5-flash')
+
+def generate_risk_explanation(data, prob):
     reasons = []
 
-    if data["amount"] > 10000:
-        reasons.append("Transaction amount is higher than typical user behavior")
+    # LOW RISK
+    if prob < 0.03:
+        return "Transaction appears low risk based on normal usage patterns."
 
-    if data["sender_old_balance"] - data["sender_new_balance"] > 0:
-        reasons.append("Noticeable reduction in sender balance")
+    # MEDIUM RISK
+    if prob < 0.1:
+        if data["amount"] > 10000:
+            reasons.append("Higher than usual amount")
+        if (data["sender_old_balance"] - data["sender_new_balance"]) / (data["sender_old_balance"] + 1) > 0.5:
+            reasons.append("Significant balance reduction")
+        if data["transaction_type"] in ["TRANSFER", "CASH_OUT"]:
+            reasons.append("Risk-prone transaction type")
 
-    if data["transaction_type"] in ["TRANSFER", "CASH_OUT"]:
-        reasons.append("Transaction type is commonly associated with fraud cases")
+        return "Moderate risk detected: " + " | ".join(reasons) if reasons else "Moderate risk detected."
 
-    if prob > 0.8:
-        reasons.append("Model confidence for fraud is very high")
+    # HIGH RISK
+    if data["amount"] > 20000:
+        reasons.append("Very large transaction amount")
+    if (data["sender_old_balance"] - data["sender_new_balance"]) / (data["sender_old_balance"] + 1) > 0.7:
+        reasons.append("Sharp balance drop")
+    if data["transaction_type"] == "CASH_OUT":
+        reasons.append("High-risk cash-out activity")
 
-    return " | ".join(reasons) if reasons else "Moderate risk detected based on combined factors"
+    reasons.append("High fraud probability assigned by model")
+
+    return "High risk detected: " + " | ".join(reasons)
+
+
+
+def generate_explanation(probability, data):
+    # 1. Always get the rule-based explanation first
+    rule_text = generate_risk_explanation(data, probability)
+    print(f"Rule-based explanation: {rule_text}")
+    llm_text = None  # Default to None
+    
+    # 2. Try to get Gemini explanation
+    try:
+        prompt = f"Explain this {probability:.2%} fraud risk in 2 to 3 sentences. Rules triggered: {rule_text}. Data: {data}"
+        # Setting a short timeout so your API doesn't hang
+        response = model.generate_content(prompt)
+        print(f"Gemini response: {response.text}")
+        llm_text = response.text
+    except Exception as e:
+        # If 429 (Rate Limit) or any error occurs, llm_text remains None
+        print(f"Gemini exhausted or error: {e}")
+        
+    return {
+        "llm_explanation": llm_text,
+        "rule_explanation": rule_text
+    }
