@@ -1,7 +1,6 @@
 from fastapi import APIRouter
 from src.database.mysql_connection import get_mysql_connection
 from src.api.predict import router as predict_router
-
 router = APIRouter()
 router.include_router(predict_router)
 
